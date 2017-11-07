@@ -1,0 +1,709 @@
+//Parameters
+	
+EMInference.prototype.maxIterations = 100;
+	
+EMInference.prototype.numObservations;
+EMInference.prototype.numActions;
+	
+EMInference.prototype.epsilon;
+	
+//Data Structures
+	
+EMInference.prototype.history;
+EMInference.prototype.currentHypothesis;
+	
+EMInference.prototype.statistics;
+	
+EMInference.prototype.strategies;
+
+//Numerical Integration
+EMInference.prototype.resolution;
+EMInference.prototype.du;
+	
+EMInference.prototype.integrationPoints;
+EMInference.prototype.integrationCoefficients;
+EMInference.prototype.integrationScale;
+
+EMInference.prototype.expMode = 0;
+EMInference.prototype.eps = 0.2;
+
+EMInference.prototype.getAction = function(observation){ //GOOD
+    if((this.expMode == 2 && Math.random() < this.eps) || this.expMode == 1)
+	    return this.randomAction();
+    return this.currentHypothesis[observation];
+}
+	
+EMInference.prototype.feedback = function(observation, action, signal){ //GOOD
+    this.history.push([observation, action, signal]);
+    this.learn();
+}
+
+EMInference.prototype.learn = function(){
+    this.findMAPHypothesis();
+}
+
+EMInference.prototype.getHypothesis = function(){
+    return this.currentHypothesis;
+}
+
+EMInference.prototype.reset = function(){
+    this.history = [];
+}
+
+//Learning
+
+EMInference.prototype.findMAPHypothesis = function(){ //GOOD
+    var newHypothesis = [];
+		
+    for(var i=0; i < this.numObservations; ++i)
+	    newHypothesis[i] = this.randomAction();
+		
+    var counter = 0;
+    var convergence;
+
+    do{
+	    this.currentHypothesis = newHypothesis;
+	    newHypothesis = this.EMUpdate();
+	    ++counter;
+
+        convergence = true;
+        for(var i=0; i < this.numActions; ++i)
+            convergence = convergence && (newHypothesis[i] == this.currentHypothesis[i]);
+    }while(!convergence && counter < this.maxIterations);
+
+    //if(counter >= this.maxIterations)
+        //alert(counter);
+}
+	
+EMInference.prototype.EMUpdate = function(){ //GOOD
+    this.getStatistics();
+    this.getIntegrationCoefficients();
+
+    hypothesis = [];
+		
+    for(var i=0; i < this.numObservations; ++i)
+	    hypothesis[i] = this.optimize(i);
+    
+    return hypothesis;
+}
+
+//gets statistics for the current hypothesis.
+EMInference.prototype.getStatistics = function(){ //GOOD ?
+    this.statistics[0] = 0;
+    this.statistics[1] = 0;
+    this.statistics[2] = 0;
+    this.statistics[3] = 0;
+		
+    var episode;
+		
+    for(var i=0; i < this.history.length; ++i){
+	    episode = this.history[i];
+
+	    if(episode[2] == 1)
+	        this.statistics[0] = this.statistics[0] + 1;
+	    else if(episode[2] == -1)
+	        this.statistics[1] = this.statistics[1] + 1;
+	    else if(this.currentHypothesis[episode[0]] == episode[1])
+	        this.statistics[2] = this.statistics[2] + 1;
+	    else
+	        this.statistics[3] = this.statistics[3] + 1;
+	}
+}
+	
+//Gets the common coefficients 
+EMInference.prototype.getIntegrationCoefficients = function(){ //GOOD ?
+    var point, t;
+	
+	// Strategy array
+	this.strategies = new Array();
+		
+    this.integrationCoefficients[0] = new LBN(0);
+    this.integrationCoefficients[1] = new LBN(0);
+		
+    for(var i=0; i < this.resolution; ++i){
+	    for(var j=0; j < this.resolution; ++j){
+	        point = this.integrationPoints[i][j][0].copy();
+	        point.power(this.statistics[0]);
+	        point.multiply(this.integrationPoints[i][j][1].copy().power(this.statistics[1]));
+	        point.multiply(this.integrationPoints[i][j][2].copy().power(this.statistics[2]));
+	        point.multiply(this.integrationPoints[i][j][3].copy().power(this.statistics[3]));
+
+			// Store the probability of this strategy -- this is the new part
+			var strategy = new Object();
+			strategy.muPlus = 1.0 - this.integrationPoints[i][j][0].toFloat();
+			strategy.muMinus = 1.0 - this.integrationPoints[i][j][1].toFloat();
+			strategy.probability = point.toFloat();
+			strategy.logProbability = point.copy().ln().toFloat();
+			this.strategies.push(strategy);
+			
+	        this.integrationCoefficients[0].add(point);
+
+	        t = this.integrationPoints[i][j][2].copy();
+	        t.divide(this.integrationPoints[i][j][3]);
+	        t.ln();
+
+	        //it may be more efficient to split integration into two triangular regions, so that only one subraction need be done
+	        this.integrationCoefficients[1].add(t.multiply(point));
+	    }
+    }
+
+    this.integrationCoefficients[0].multiply(this.integrationScale[0]);
+    this.integrationCoefficients[1].multiply(this.integrationScale[1]);		
+
+    //alert(this.statistics.toString());
+    //alert(this.integrationCoefficients[0].mantissa + " | " + this.integrationCoefficients[0].exponent + " || " + this.integrationCoefficients[1].mantissa + " | " + this.integrationCoefficients[1].exponent);
+}
+	
+EMInference.prototype.optimize = function(observation){ //GOOD
+    var maximum;
+    var value;
+    var a, b;
+    var best = this.randomAction();
+    var stats = this.observationStatistics(observation, best);
+
+    a = this.integrationCoefficients[0].copy();
+    b = this.integrationCoefficients[1].copy();
+
+    //alert(a.mantissa + " | " + a.exponent + " || " + b.mantissa + " | " + b.exponent);
+
+    maximum = a.fmultiply(stats[0] - stats[1]).add(b.fmultiply(stats[2]));
+
+    for(var i=0; i < this.numActions; ++i){
+	    if(i != best){
+	        stats = this.observationStatistics(observation, i);
+
+	        a = this.integrationCoefficients[0].copy();
+	        b = this.integrationCoefficients[1].copy();
+
+	        value = a.fmultiply(stats[0] - stats[1]).add(b.fmultiply(stats[2]));
+
+	        if(value.compareTo(maximum) > 0){
+		        best = i;
+		        maximum = value;
+	        }
+	    }
+    }
+
+    return best;
+}
+	
+EMInference.prototype.observationStatistics = function(observation, action){ //GOOD
+
+    var stats = [];
+
+    stats[0] = 0;
+    stats[1] = 0;
+    stats[2] = 0;
+
+    var episode;
+
+    for(var i=0; i < this.history.length; ++i){
+	    episode = this.history[i];
+
+	    if(episode[0] == observation && episode[1] == action){
+	        if(episode[2] == 1)
+		        stats[0] = stats[0] + 1;
+	        else if(episode[2] == -1)
+		        stats[1] =  stats[1] + 1;
+	        else if(episode[2] == 0)
+		        stats[2] = stats[2] + 1;
+	    }
+    }
+
+    return stats;
+}
+	
+//Utilities
+	
+//initialize history list and compute the grid for numerical integration
+EMInference.prototype.initialize = function(){ //GOOD
+    this.history = [];
+
+    this.statistics = [];
+		
+    this.integrationPoints = [];
+    this.integrationCoefficients = [];
+    this.integrationScale = [];
+
+    this.du = 1.0/this.resolution;
+
+    var pa = 0;
+    var pb = 0;
+		
+    for(var i=0; i < this.resolution; ++i){
+	    pb = 0;
+	    this.integrationPoints[i] = [];
+
+	    for(var j=0; j < this.resolution; ++j){
+	        this.integrationPoints[i][j] = [];
+	        this.integrationPoints[i][j][0] = new LBN(1-pa);
+	        this.integrationPoints[i][j][1] = new LBN(1-pb);
+	        this.integrationPoints[i][j][2] = new LBN((1-this.epsilon)*pa + this.epsilon*pb);
+	        this.integrationPoints[i][j][3] = new LBN(this.epsilon*pa + (1-this.epsilon)*pb);
+
+	        pb += this.du;
+	    }
+
+	    pa += this.du;
+    }
+
+    this.integrationPoints[0][0][0] = new LBN(1-this.du*0.1);
+    this.integrationPoints[0][0][1] = new LBN(1-this.du*0.1);
+    this.integrationPoints[0][0][2] = new LBN((1-this.epsilon)*this.du*0.1 + this.epsilon*this.du*0.1);
+    this.integrationPoints[0][0][3] = new LBN(this.epsilon*this.du*0.1 + (1-this.epsilon)*this.du*0.1);
+
+    this.integrationScale[0] = new LBN(Math.log((1-this.epsilon)/this.epsilon)*this.du*this.du);
+    this.integrationScale[1] = new LBN(this.du*this.du);
+
+    this.currentHypothesis = [];
+    
+    for(var i=0; i < this.numObservations; ++i)
+	    this.currentHypothesis[i] = this.randomAction();
+}
+	
+EMInference.prototype.randomAction = function(){ //GOOD
+    return Math.floor(this.numActions*Math.random());
+}
+
+EMInference.prototype.name = function(){
+    var n = "EM Inference Agent; ";
+    n += "epsilon: " + this.epsilon + "; ";
+    n += "resolution: " + this.resolution + "; ";
+    
+    if(this.expMode == 0)
+	n += "MAP";
+    else if(this.expMode == 1)
+	n += "random";
+    else
+	n += "epsilon greedy: " + this.eps;
+    
+    return n;
+}
+
+EMInference.prototype.toString = function(){
+    return "[" + this.currentHypothesis.toString() + "]";
+}
+
+function EMInference(o, a, r, e){
+    this.numObservations = o;
+    this.numActions = a;
+    this.resolution = r;
+    this.epsilon = e;
+
+    this.initialize();
+}
+
+//Unlimited Scale Class
+
+function LBN(num, exp){
+    if(num == 0){
+        this.mantissa = 0;
+        this.exponent = 0;
+	    this.isZero = true;
+    }
+    else if(typeof exp != "undefined"){
+	    this.mantissa = num;
+	    this.exponent = exp;
+    }
+    else{
+        this.exponent = Math.floor(Math.log(Math.abs(num))/Math.LN2);
+	    this.mantissa = num/Math.pow(2, this.exponent);
+    }
+}
+
+LBN.prototype.add = function(num){
+    if(!num.isZero){ //IF ZERO NOTHING CHANGES
+	    if(this.isZero){ //THIS IS FINE - JUST MAKE THIS NUMBER EQUAL TO THE NEW ONE
+	        this.mantissa = num.mantissa;
+	        this.exponent = num.exponent;
+            this.isZero = false;
+	    }
+	    else{
+	        var scaleDiff = this.exponent - num.exponent; //GET SCALE DIFFERENCE - OKAY
+
+            if(scaleDiff <= -23){ //DO WE REALLY KNOW THE PRESCISION?
+                this.mantissa = num.mantissa;  //THIS NUMBER IS TOO SMALL TO MAKE A DIFFERENCE
+                this.exponent = num.exponent;
+            }
+            else if(scaleDiff < 23){ //DON'T DO ANYTHING IF THIS NUMBER IS LARGE ENOUGH
+                this.mantissa = this.mantissa + num.mantissa*Math.pow(2, -scaleDiff);
+                this.normalize();
+            }
+	    }
+    }
+    
+    return this;
+}
+
+LBN.prototype.multiply = function(num){
+    if(this.isZero || num.isZero){
+	    this.isZero = true;
+        this.mantissa = 0;
+        this.exponent = 0;
+    }	
+    else{
+	    this.mantissa = this.mantissa*num.mantissa;
+	    this.exponent = this.exponent + num.exponent;
+    
+	    this.normalize();
+    }
+
+    return this;
+}
+
+LBN.prototype.divide = function(num){
+    if(!(this.isZero || num.isZero)){
+	    this.mantissa = this.mantissa/num.mantissa;
+	    this.exponent = this.exponent -  num.exponent;
+    
+	    this.normalize();
+    }
+
+    return this;
+}
+
+LBN.prototype.fmultiply = function(num){ //FIX THIS
+    if(!this.isZero){    
+        if(num == 0){
+            this.isZero = true;
+            this.mantissa = 0;
+            this.exponent = 0;
+        }
+        else{
+	        this.mantissa = this.mantissa * num;
+	        this.normalize();
+        }
+    }
+
+    return this;
+}
+
+LBN.prototype.power = function(num){
+
+    if(this.isZero)
+        return this;
+
+    if(num < 0){ //INVERSION, COMPUTE ABSOLUTE EXPONENT THEN DIVIDE ONE BY
+        this.power(-1*num);
+        
+        if(this.mantissa > 1){
+            this.mantissa = 2/this.mantissa;
+            this.exponent = -1*this.exponent-1;
+        }        
+        else
+            this.exponent = -1*this.exponent;    
+    }
+    else if(num < 2){ //EITHER ZERO OR ONE
+	    if(num == 0){ //IF ONE LEAVE SAME, IF ZERO, SET TO ONE
+	        this.exponent = 0;
+	        this.mantissa = 1;
+	    }
+    }
+    else if(num % 2 == 0){ //IF DIVISIBLE BY TWO, REPEAT SQUARE
+	    this.power(num/2);
+
+	    this.mantissa = this.mantissa*this.mantissa;
+	    this.exponent = this.exponent + this.exponent;
+    }
+    else{ //SHIFT TILL DIVISIBLE BY TWO
+	    var m = this.mantissa;
+	    var e = this.exponent;
+
+	    this.power(num-1);
+
+	    this.mantissa = this.mantissa*m;
+	    this.exponent = this.exponent + e;
+    }
+
+    if(this.mantissa >= 2){
+        this.mantissa = this.mantissa/2;
+        this.exponent = this.exponent + 1;
+    }
+
+    return this;
+}
+
+LBN.prototype.compareTo = function(num){
+
+    if(this.isZero && num.isZero)
+        return 0;
+
+    if(this.isZero)
+        return (num.mantissa < 0) ? 1 : -1;
+
+    if(num.isZero)
+        return (this.mantissa < 0) ? -1 : 1;
+
+    if(this.mantissa > 0 && num.mantissa <= 0)
+        return 1;
+    
+    if(this.mantissa < 0 && num.mantissa > 0)
+        return -1;
+
+    if(this.exponent > num.exponent)
+	    return (this.mantissa >= 0) ? 1 : -1;
+    
+    if(this.exponent < num.exponent)
+	    return (this.mantissa >= 0) ? -1 : 1;
+    
+    if(this.mantissa > num.mantissa)
+        return 1;
+
+    if(this.mantissa < num.mantissa)
+        return -1;
+    
+    return 0;
+}
+
+LBN.prototype.ln = function(){
+    //ASSUMING THIS IS NOT ZERO
+
+    this.mantissa = Math.log(this.mantissa) + this.exponent*Math.log(2);
+    this.exponent = 0;
+
+    this.normalize();
+
+    return this;
+}
+
+LBN.prototype.normalize = function(){
+    if(this.mantissa == 0){
+        this.isZero = true;
+        this.exponent = 0;
+    }
+    else{
+        var e = Math.floor(Math.log(Math.abs(this.mantissa))/Math.LN2);
+        this.exponent = this.exponent + e;
+	    this.mantissa = this.mantissa/Math.pow(2, e);
+    }
+}
+
+LBN.prototype.copy = function(){
+    return new LBN(this.mantissa, this.exponent);
+}
+
+LBN.prototype.toFloat = function(){
+    if(this.isZero)
+	    return 0;
+    return this.mantissa * Math.pow(2, this.exponent);
+}
+
+//UNIT TESTS
+function LBN_TEST(){
+
+    var zero = new LBN(0);
+    var one = new LBN(1);
+    var none = new LBN(-1);
+    var two = new LBN(2);
+    var pi = new LBN(Math.PI);
+    var e = new LBN(Math.E);
+    var million = new LBN(1000000);
+    var billion = new LBN(1000000000);
+
+    var out = "";
+
+    //zero plus zero   
+    out += "zero plus zero (0): " + zero.copy().add(zero).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one plus zero
+    out += "one plus zero (1): " + one.copy().add(zero).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one plus one
+    out += "one plus one (2): " + one.copy().add(one).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one minus one
+    out += "one minus one (0): " + one.copy().add(none).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //zero times zero
+    out += "zero times zero (0): " + zero.copy().multiply(zero).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //zero times one
+    out += "zero times one (0): " + zero.copy().multiply(one).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //zero times negative one
+    out += "zero times negative one (0): " + zero.copy().multiply(none).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one times one
+    out += "one times one (1): " + one.copy().multiply(one).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one times negative one
+    out += "one times one (-1): " + one.copy().multiply(none).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one divided by one
+    out += "one divided by one (1): " + one.copy().divide(one).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one divided by negative one
+    out += "one divided by negative one (-1): " + one.copy().divide(none).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two divided by one
+    out += "two divided by one (2): " + two.copy().divide(one).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //one divided by two
+    out += "one divided by two (0.5): " + one.copy().divide(two).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI plus PI
+    out += "PI plus PI (" + (Math.PI + Math.PI) + "): " + pi.copy().add(pi).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI plus E
+    out += "PI plus E (" + (Math.PI + Math.E) + "): " + pi.copy().add(e).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI times E
+    out += "PI times E (" + (Math.PI*Math.E) + "): " + pi.copy().multiply(e).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI divided by E
+    out += "PI divided by E (" + (Math.PI/Math.E) + "): " + pi.copy().divide(e).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the one million
+    var twotomillion = two.copy().power(1000000);
+    out += "two to the one million (1, 100): (" + twotomillion.mantissa + ", " + twotomillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the one billion
+    var twotobillion = two.copy().power(1000000000);
+    out += "two to the one billion (1, 1000): (" + twotobillion.mantissa + ", " + twotobillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the one million greater than two to the one billion
+    out += "two to the one million greater than two to the one billion (-1): " + twotomillion.compareTo(twotobillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the one billion greater than two to the one million
+    out += "two to the one billion greater than two to the one million (1): " + twotobillion.compareTo(twotomillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the negative one million
+    twotomillion = two.copy().power(-100);
+    out += "two to the negative one million (1, -100): (" + twotomillion.mantissa + ", " + twotomillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the negative one billion
+    twotobillion = two.copy().power(-1000);
+    out += "two to the negative one billion (1, -1000): (" + twotobillion.mantissa + ", " + twotobillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //two to the negative one million greater than two to the negative one billion
+    out += "two to the negative one million greater than two to the negative one billion (1): " + twotomillion.compareTo(twotobillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+   //two to the negative one billion greater than two to the negative one million
+    out += "two to the negative one billion greater than two to the negative one million (-1): " + twotobillion.compareTo(twotomillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the one million
+    var pitomillion = pi.copy().power(100);
+    out += "PI to the one million (?, ?): (" + pitomillion.mantissa + ", " + pitomillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the one billion
+    var pitobillion = pi.copy().power(1000);
+    out += "PI to the one billion (?, ?): (" + pitobillion.mantissa + ", " + pitobillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    var pitofive = pi.copy().power(5);
+    out += "PI to the fifth (" + Math.pow(Math.PI, 5) + "): " + pitofive.toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    var pitoten = pi.copy().power(10);
+    out += "PI to the tenth (" + Math.pow(Math.PI, 10) + "): " + pitoten.toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    pitofive = (new LBN(1/Math.PI)).power(5);
+    out += "PI to the minus fifth (" + Math.pow(1/Math.PI, 5) + "): " + pitofive.toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    pitoten = (new LBN(1/Math.PI)).power(10);
+    out += "PI to the minus tenth (" + Math.pow(1/Math.PI, 10) + "): " + pitoten.toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    pitoten = (new LBN(1/Math.PI)).power(6).add((new LBN(1/Math.PI)).power(5));
+    out += "power sum (" + (Math.pow(1/Math.PI, 6) + Math.pow(1/Math.PI, 5)) + "): " + pitoten.toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the one million greater than PI to the one billion
+    out += "PI to the one million greater than PI to the one billion (-1): " + pitomillion.compareTo(pitobillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the one billion greater than PI to the one million
+    out += "PI to the one billion greater than PI to the one million (1): " + pitobillion.compareTo(pitomillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the negative one million
+    pitomillion = pi.copy().power(-100);
+    out += "PI to the negative one million (?, ?): (" + pitomillion.mantissa + ", " + pitomillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the negative one billion
+    pitobillion = pi.copy().power(-1000);
+    out += "PI to the negative one billion (?, ?): (" + pitobillion.mantissa + ", " + pitobillion.exponent + ")<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the negative one million greater than PI to the negative one billion
+    out += "PI to the negative one million greater than PI to the negative one billion (1): " + pitomillion.compareTo(pitobillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //PI to the negative one billion greater than PI to the negative one million
+    out += "PI to the negative one billion greater than PI to the negative one million (-1): " + pitobillion.compareTo(pitomillion) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of one
+    out += "natural log of one (0): " + one.copy().ln().toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E
+    out += "natural log of E (1): " + e.copy().ln().toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E times E
+    out += "natural log of E times E (2): " + e.copy().multiply(e).ln().toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E times E
+    out += "1 time (float) 1 (1): " + one.copy().fmultiply(1).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E times E
+    out += "1 times (float) 0.5 (0.5): " + one.copy().fmultiply(0.5).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E times E
+    out += "2 times (float) 1 (2): " + two.copy().fmultiply(1).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    //natural log of E times E
+    out += "2 times (float) 0.5 (1): " + two.copy().fmultiply(0.5).toFloat() + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    out += "1 compared to 1 (0): " + one.compareTo(one) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    out += "0 compared to 0 (0): " + zero.compareTo(zero) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    out += "-1 compared to -1 (0): " + none.compareTo(none) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    out += "PI^10 compared to PI^10 (0): " + pi.copy().power(10).compareTo(pi.copy().power(10)) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    out += "PI^-10 compared to PI^-10 (0): " + pi.copy().power(-10).compareTo(pi.copy().power(-10)) + "<br />";
+    document.getElementById("output").innerHTML = out;
+
+    alert("done");
+}
